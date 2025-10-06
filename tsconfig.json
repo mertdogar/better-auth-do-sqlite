@@ -1,22 +1,40 @@
 {
   "compilerOptions": {
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "target": "ES2016",
     "outDir": "dist/out",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "baseUrl": ".",
     "rootDir": ".",
     "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true,
-    "isolatedModules": true,
     "noImplicitThis": false,
     "noUncheckedIndexedAccess": true,
     "resolveJsonModule": true,
-    "skipLibCheck": true,
     "sourceMap": true,
+    "useDefineForClassFields": true,
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "types": ["vite/client", "@cloudflare/workers-types"],
+
+    /* Decorator support */
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
     "strict": true,
-    "useDefineForClassFields": true
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true
+
   },
   "exclude": [
     "**/*.js",

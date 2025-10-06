@@ -1,0 +1,50 @@
+# Source files
+lib/
+*.ts
+!*.d.ts
+
+# Development files
+.vscode/
+.changeset/
+.github/
+tools/
+docs/
+coverage/
+
+# Config files
+tsconfig.json
+tsconfig.spec.json
+tsup.config.ts
+vitest.config.ts
+eslint.config.mjs
+.prettierrc.json
+.prettierignore
+.gitignore
+.editorconfig
+
+# Documentation (keep only root README)
+docs.md
+CONTRIBUTING.md
+
+# Test files
+**/*.spec.ts
+**/*.test.ts
+**/__tests__/
+
+# Build artifacts
+*.log
+*.lock
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+bun.lockb
+
+# Environment
+.env
+.env.*
+
+# Misc
+node_modules/
+.DS_Store
+*.tsbuildinfo
+
