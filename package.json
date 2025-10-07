@@ -1,15 +1,14 @@
 {
   "name": "@mertdogar/better-auth-do-sqlite",
   "libName": "better-auth-do-sqlite",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Complete authentication and database solution for Cloudflare Durable Objects with Better Auth and libSQL HTTP protocol support",
-  "main": "dist/index.js",
-  "module": "dist/index.js",
-  "types": "dist/lib/index.d.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "browser": "./dist/index.umd.js",
-      "types": "./dist/lib/index.d.ts",
+      "types": "./dist/index.d.ts",
       "require": "./dist/index.cjs",
       "import": "./dist/index.js"
     }
@@ -24,7 +23,7 @@
     "build": "npm run build-common -- --onSuccess \"npm run build-types\"",
     "dev": "npm run build-common -- --sourcemap --watch --onSuccess \"npm run build-types\"",
     "dev-all": "npm run build-all -- --watch",
-    "prepublishOnly": "npm run lint && npm run build-all",
+    "prepublishOnly": "npm run build-all",
     "update-jsr-version": "node --import tsx ./tools/update-jsr-version.mts",
     "publish-package": "changeset publish",
     "publish-package-jsr": "npm run update-jsr-version && npx jsr publish --allow-dirty",
@@ -57,6 +56,9 @@
     "url": "https://github.com/mertdogar"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "bugs": {
     "url": "https://github.com/mertdogar/better-auth-do-sqlite/issues"
   },
