@@ -1,63 +1,58 @@
-import { Context, Next } from "hono";
+import { Context, Next } from 'hono'
+import { AuthDO } from './auth-do'
+import { DurableObject } from 'cloudflare:workers'
 
 /**
  * Extract bearer token from Authorization header
  */
 export function getBearerToken(c: Context): string | null {
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return null;
+  const authHeader = c.req.header('Authorization')
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null
   }
-  return authHeader.slice(7);
+  return authHeader.slice(7)
 }
 
 /**
  * Get auth DO stub
  */
-export function getAuthDO(c: Context) {
-  const id = c.env.APP_DO.idFromName("auth");
-  return c.env.APP_DO.get(id);
+export function getDO<DO extends DurableObject<unknown> = AuthDO>(c: Context, name: string) {
+  const id = c.env.APP_DO.idFromName(name)
+  return c.env.APP_DO.get(id) as DO
 }
 
 /**
  * Middleware: Require authentication
  * Adds authenticated user to context as c.get('user')
  */
-export async function requireAuth(c: Context, next: Next) {
-  const token = getBearerToken(c);
+export function authMiddleware(name: string) {
+  return async (c: Context, next: Next) => {
+    const authDO = getDO(c, name)
+    const headersOnlyRequest = new Request(c.req.url, {
+      headers: c.req.raw.headers,
+    })
+    const result = await authDO.getActiveSession(headersOnlyRequest)
+    if (!result) {
+      c.set('user', null)
+      c.set('session', null)
+      c.set('sandboxApiKey', null)
+      return next()
+    }
 
-  if (!token) {
-    return c.json({ error: "Authorization token required" }, 401);
+    c.set('user', result.session.user)
+    c.set('session', result.session)
+    c.set('sandboxApiKey', result.sandboxApiKey)
+    return next()
   }
-
-  const authDO = getAuthDO(c);
-  const result = await authDO.getAuthenticatedUser(token);
-
-  if ("error" in result) {
-    return c.json(result, 401);
-  }
-
-  // Store user in context for downstream handlers
-  c.set("user", result);
-  await next();
 }
 
 /**
- * Middleware: Optional authentication
- * Adds authenticated user to context if token is provided
+ * Middleware: Require authentication
+ * Adds authenticated user to context as c.get('user')
  */
-export async function optionalAuth(c: Context, next: Next) {
-  const token = getBearerToken(c);
-
-  if (token) {
-    const authDO = getAuthDO(c);
-    const result = await authDO.getAuthenticatedUser(token);
-
-    if (!("error" in result)) {
-      c.set("user", result);
-    }
+export function requireAuth(c: Context, next: Next) {
+  if (!c.get('user')) {
+    return c.json({ error: 'Authorization token required' }, 401)
   }
-
-  await next();
+  return next()
 }
-

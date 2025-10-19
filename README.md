@@ -20,7 +20,7 @@ A complete authentication and database solution for Cloudflare Durable Objects w
 ### What's Included
 
 - 🔐 **Better Auth Adapter** - Full Better Auth integration with automatic schema management
-- 🎨 **TypeScript Decorators** - Clean `@Authenticatable()` decorator for instant auth capabilities
+- 🎯 **Base Auth Class** - Extend `AuthDO` for instant authentication capabilities
 - 🔌 **libSQL HTTP Server** - Query your SQLite database via standard HTTP protocol (v1, v2, v3)
 - 🛡️ **Type-Safe** - Full TypeScript support with comprehensive type definitions
 - ⚡ **Production Ready** - Optimized for Cloudflare's global edge network
@@ -52,7 +52,7 @@ A complete authentication and database solution for Cloudflare Durable Objects w
 
 ### Developer Experience
 
-- 🎯 **Two Usage Patterns** - Decorator or inheritance, your choice
+- 🎯 **Simple Inheritance Pattern** - Extend AuthDO to add your custom functionality
 - 📚 **Comprehensive Docs** - Detailed guides and examples
 - 🧪 **Test Suite** - Complete testing framework included
 - 🔧 **Easy Integration** - Works with Hono, vanilla fetch handlers, and more
@@ -73,90 +73,150 @@ bun add better-auth-do-sqlite better-auth
 
 ## Quick Start
 
-### Option 1: Using the Decorator (Recommended)
+### Step 1: Create Your Auth Durable Object
 
-The easiest way to add authentication to your Durable Object:
+Extend the `AuthDO` base class to add authentication to your Durable Object:
 
 ```typescript
 import { DurableObject } from 'cloudflare:workers'
-import { Authenticatable } from 'better-auth-do-sqlite'
+import { createAuth, initBetterAuthTables, type Auth } from 'better-auth-do-sqlite'
 
-@Authenticatable()
-export class MyAppDO extends DurableObject {
+export class MyAuthDO extends DurableObject {
+  protected sql = this.ctx.storage.sql
+  protected auth: Auth | null = null
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
+    // Initialize Better Auth database tables
+    initBetterAuthTables(this.sql)
+  }
+
+  /**
+   * Get or create the Better Auth instance
+   */
+  getAuth(): Auth {
+    if (!this.auth) {
+      this.auth = createAuth(this.sql)
+    }
+    return this.auth
+  }
+
+  /**
+   * Handle incoming HTTP requests
+   */
   async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url)
+    const auth = this.getAuth()
 
-    // Authentication routes (/api/auth/*) are handled automatically
-    // by the decorator, so you only need to handle your app routes
-
-    if (url.pathname === '/api/hello') {
-      return new Response(JSON.stringify({ message: 'Hello World' }), {
+    try {
+      return await auth.handler(request)
+    } catch (error) {
+      console.error('Auth error:', error)
+      return new Response(JSON.stringify({ error: 'Authentication error' }), {
+        status: 500,
         headers: { 'Content-Type': 'application/json' },
       })
     }
-
-    return new Response('Not found', { status: 404 })
   }
 }
 ```
 
-### Option 2: Using Inheritance
+### Step 2: Extend for Custom Functionality
 
-Extend the `AuthenticatableDurableObject` class:
+Add your own application logic by extending the Auth DO:
 
 ```typescript
-import { AuthenticatableDurableObject } from 'better-auth-do-sqlite'
+import { MyAuthDO } from './auth-do'
 
-export class MyAppDO extends AuthenticatableDurableObject {
-  async fetch(request: Request): Promise<Response> {
-    // Try auth routes first
-    const response = await super.fetch(request)
-    if (response.status !== 404) {
-      return response
-    }
+export class MyAppDO extends MyAuthDO {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
 
-    // Handle your custom routes
-    const url = new URL(request.url)
-    if (url.pathname === '/api/hello') {
-      return new Response(JSON.stringify({ message: 'Hello World' }), {
-        headers: { 'Content-Type': 'application/json' },
-      })
-    }
+    // Initialize your custom tables
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS todos (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        completed INTEGER DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE
+      )
+    `)
+  }
 
-    return new Response('Not found', { status: 404 })
+  // Add custom RPC methods
+  async createTodo(userId: string, title: string) {
+    const id = crypto.randomUUID()
+    const now = Date.now()
+
+    this.sql.exec(
+      `INSERT INTO todos (id, user_id, title, created_at)
+       VALUES (?, ?, ?, ?)`,
+      id,
+      userId,
+      title,
+      now
+    )
+
+    return { id, userId, title, completed: false, createdAt: now }
+  }
+
+  async listTodos(userId: string) {
+    return this.sql.exec(`SELECT * FROM todos WHERE user_id = ?`, userId).toArray()
   }
 }
 ```
 
-### Configure Wrangler
+### Step 3: Set Up Routing in Your Worker
 
-Add the Durable Object binding to your `wrangler.toml`:
-
-```toml
-[[durable_objects.bindings]]
-name = "AUTH_DO"
-class_name = "MyAppDO"
-script_name = "your-worker-name"
-```
-
-### Use in Your Worker
+Use the provided routers to handle authentication and SQL requests:
 
 ```typescript
 import { Hono } from 'hono'
+import { betterAuthRouter, sqlServerRouter, authMiddleware } from 'better-auth-do-sqlite'
 
 const app = new Hono<{ Bindings: Env }>()
 
-// Route auth requests to the Durable Object
-app.all('/api/auth/*', async (c) => {
-  const id = c.env.AUTH_DO.idFromName('global-auth')
-  const stub = c.env.AUTH_DO.get(id)
-  return stub.fetch(c.req.raw)
+// Optional: Add auth middleware to protect routes
+app.use('*', authMiddleware('APP_DO'))
+
+// Mount Better Auth routes
+app.route('/api/auth', betterAuthRouter('APP_DO'))
+
+// Optional: Mount libSQL HTTP server routes
+app.route('/api/sql', sqlServerRouter('APP_DO', /^\/api\/sql/))
+
+// Your custom routes
+app.get('/api/todos', async (c) => {
+  const user = c.get('user')
+  if (!user) {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  const id = c.env.APP_DO.idFromName('global')
+  const stub = c.env.APP_DO.get(id)
+  const todos = await stub.listTodos(user.id)
+
+  return c.json({ todos })
 })
 
 export default app
 ```
 
+### Step 4: Configure Wrangler
+
+Add the Durable Object binding to your `wrangler.toml`:
+
+```toml
+[[durable_objects.bindings]]
+name = "APP_DO"
+class_name = "MyAppDO"
+script_name = "your-worker-name"
+```
+
 ### Frontend Client
+
+Use Better Auth's official client directly in your frontend:
 
 ```typescript
 import { createAuthClient } from 'better-auth/client'
@@ -182,23 +242,54 @@ await authClient.signIn.email({
 const session = await authClient.getSession()
 ```
 
+**Or integrate it into your API client:**
+
+```typescript
+import { createAuthClient } from 'better-auth/client'
+import { apiKeyClient, adminClient } from 'better-auth/client/plugins'
+
+const authClient = createAuthClient({
+  baseURL: 'http://localhost:8787',
+  plugins: [apiKeyClient(), adminClient()],
+})
+
+export class APIClient {
+  public authClient: typeof authClient
+
+  constructor(baseURL: string = 'http://localhost:8787') {
+    this.authClient = authClient
+  }
+
+  get auth() {
+    return this.authClient
+  }
+}
+
+// Usage
+const api = new APIClient()
+
+// Sign up
+await api.auth.signUp.email({
+  email: 'user@example.com',
+  password: 'securePassword123',
+  name: 'John Doe',
+})
+
+// Get session
+const session = await api.auth.getSession()
+```
+
 ---
 
 ## Documentation
 
-### Authentication Routes
+Better Auth handles all authentication endpoints automatically. Use the [Better Auth client](https://www.better-auth.com) in your frontend to interact with these endpoints. See the [Frontend Client](#frontend-client) section above for examples.
 
-The decorator automatically handles these Better Auth endpoints:
+For a complete list of available endpoints and features, refer to the [Better Auth API documentation](https://www.better-auth.com/docs/api-reference).
 
-- `POST /api/auth/sign-up` - Create new account
-- `POST /api/auth/sign-in` - Sign in with email/password
-- `POST /api/auth/sign-out` - Sign out
-- `GET /api/auth/session` - Get current session
-- And all other Better Auth endpoints...
+### Built-in RPC Methods
 
-### RPC Methods
-
-When using the decorator or inheritance, your Durable Object gets these RPC methods:
+The base AuthDO class can be extended to include these authentication RPC methods:
 
 ```typescript
 // Sign up a new user
@@ -395,20 +486,45 @@ const res2 = await fetch('http://your-worker.com/api/sql/v2/pipeline', {
 
 ## Examples
 
-### Combining with Other Decorators
+### Complete Auth + libSQL Setup
 
 ```typescript
 import { DurableObject } from 'cloudflare:workers'
-import { Authenticatable } from 'better-auth-do-sqlite'
+import {
+  createAuth,
+  initBetterAuthTables,
+  LibSQLHttpServer,
+  type Auth,
+} from 'better-auth-do-sqlite'
 
-@Authenticatable()
 export class MyAppDO extends DurableObject {
-  async fetch(request: Request): Promise<Response> {
-    // Both auth routes (/api/auth/*) and SQL routes (/api/sql/*)
-    // are handled automatically
+  protected sql = this.ctx.storage.sql
+  protected auth: Auth | null = null
+  protected libsqlServer: LibSQLHttpServer
 
-    // Your custom routes here
-    return new Response('Hello World')
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
+    initBetterAuthTables(this.sql)
+    this.libsqlServer = new LibSQLHttpServer(this.sql)
+  }
+
+  getAuth(): Auth {
+    if (!this.auth) {
+      this.auth = createAuth(this.sql)
+    }
+    return this.auth
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url)
+
+    // Route libSQL requests
+    if (url.pathname.startsWith('/sql')) {
+      return await this.libsqlServer.handleRequest(request)
+    }
+
+    // Route auth requests
+    return await this.getAuth().handler(request)
   }
 }
 ```
@@ -416,45 +532,58 @@ export class MyAppDO extends DurableObject {
 ### Protected Routes with Middleware
 
 ```typescript
-import { requireAuth } from 'better-auth-do-sqlite'
+import { requireAuth, authMiddleware } from 'better-auth-do-sqlite'
 
-app.use('/protected/*', requireAuth)
+// Apply auth middleware to all routes
+app.use('*', authMiddleware('APP_DO'))
 
-app.get('/protected/profile', async (c) => {
+// Protect specific routes
+app.use('/api/protected/*', requireAuth)
+
+app.get('/api/protected/profile', async (c) => {
   const user = c.get('user')
   return c.json({ user })
 })
 ```
 
-### Custom RPC Methods
+### Session Management Example
 
-Extend the Durable Object with your own methods:
+Get the active session from your Durable Object:
 
 ```typescript
-import { AuthenticatableDurableObject } from 'better-auth-do-sqlite'
+export class MyAuthDO extends DurableObject {
+  protected sql = this.ctx.storage.sql
+  protected auth: Auth | null = null
 
-export class MyAppDO extends AuthenticatableDurableObject {
-  async getActiveUsers() {
-    return this.sql
-      .exec(
-        `SELECT u.* FROM user u
-         JOIN session s ON u.id = s.user_id
-         WHERE s.expires_at > ?`,
-        Date.now()
-      )
-      .toArray()
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
+    initBetterAuthTables(this.sql)
   }
 
-  async getUserStats(userId: string) {
-    const user = await this.getUserById(userId)
-    const sessions = this.sql
-      .exec(`SELECT COUNT(*) as count FROM session WHERE user_id = ?`, userId)
-      .toArray()
-
-    return {
-      user,
-      sessionCount: sessions[0].count,
+  getAuth(): Auth {
+    if (!this.auth) {
+      this.auth = createAuth(this.sql)
     }
+    return this.auth
+  }
+
+  async getActiveSession(request: Request) {
+    const session = await this.getAuth().api.getSession({
+      headers: request.headers,
+    })
+
+    if (session) {
+      return {
+        user: session.user,
+        session: session.session,
+      }
+    }
+    return null
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const auth = this.getAuth()
+    return await auth.handler(request)
   }
 }
 ```
@@ -601,41 +730,57 @@ The adapter handles the following transformations automatically:
 
 ## How It Works
 
-### The Decorator Pattern
+### The Inheritance Pattern
 
-The `@Authenticatable()` decorator:
+The base pattern follows a simple class inheritance model:
 
-1. **Wraps your class** - Creates a new class that extends your original class
-2. **Adds AuthHandler** - Initializes an `AuthHandler` instance that manages all auth logic
-3. **Intercepts fetch** - Checks if incoming requests are for auth routes before passing to your fetch method
-4. **Adds RPC methods** - Delegates all authentication RPC methods to the handler
-5. **Initializes tables** - Automatically creates Better Auth database tables on first use
+1. **Create Base Auth DO** - Extend `DurableObject` and initialize Better Auth
+2. **Initialize Tables** - Call `initBetterAuthTables(this.sql)` in constructor
+3. **Create Auth Instance** - Use `createAuth(this.sql)` to get Better Auth instance
+4. **Handle Requests** - Route requests to `auth.handler(request)`
+5. **Extend for Custom Logic** - Add your own tables and RPC methods
 
-The handler will:
+The Better Auth adapter will:
 
-- Return authentication responses for `/api/auth/*` routes
-- Return libSQL responses for `/api/sql/*` routes
-- Return a 404 for other routes, allowing your custom fetch to handle them
-- Initialize the Better Auth database tables automatically
-- Manage all user authentication state in the Durable Object's SQL storage
+- Handle all authentication endpoints (`/api/auth/*`)
+- Manage user accounts, sessions, and verification tokens
+- Store everything in your Durable Object's SQLite database
+- Provide type-safe access to user data
+
+The libSQL HTTP Server (optional) will:
+
+- Provide direct SQL access via HTTP protocol
+- Support v1, v2, and v3 libSQL APIs
+- Enable use of standard `@libsql/client`
+- Allow both positional and named parameters
 
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Durable Object                         │
+┌──────────────────────────────────────────────────────────────┐
+│                         Worker                               │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │              Hono Router (index.ts)                    │  │
+│  │                                                         │  │
+│  │  /api/auth/*  ──▶  betterAuthRouter('APP_DO')         │  │
+│  │  /api/sql/*   ──▶  sqlServerRouter('APP_DO')          │  │
+│  │  /api/todos   ──▶  Your custom routes                  │  │
+│  └────────────────────┬──────────────────────────────────┘  │
+│                       │                                      │
+│                       ▼                                      │
 │  ┌─────────────────────────────────────────────────────┐   │
-│  │              MyAppDO (fetch handler)                 │   │
+│  │              Durable Object (MyAppDO)                │   │
 │  │                                                       │   │
 │  │  ┌──────────────┐    ┌───────────────────────────┐ │   │
-│  │  │   Request    │    │   Path Routing           │ │   │
-│  │  │   Arrives    │───▶│   - /api/auth/* → Auth   │ │   │
-│  │  │              │    │   - /api/sql/* → libSQL  │ │   │
-│  │  └──────────────┘    └───────────────────────────┘ │   │
+│  │  │   Request    │    │   fetch() Handler         │ │   │
+│  │  │   Arrives    │───▶│   - Auth requests         │ │   │
+│  │  │              │    │   - SQL requests          │ │   │
+│  │  └──────────────┘    │   - Custom RPC methods    │ │   │
+│  │                      └───────────────────────────┘ │   │
 │  │                                                       │   │
 │  │  ┌───────────────────┐      ┌─────────────────────┐│   │
 │  │  │ LibSQLHttpServer  │      │    Better Auth      ││   │
-│  │  │                   │      │                     ││   │
+│  │  │ (Optional)        │      │                     ││   │
 │  │  │ - V1 API Handler  │      │ - Auth Handler      ││   │
 │  │  │ - V2 API Handler  │      │ - Session Mgmt      ││   │
 │  │  │ - V3 API Handler  │      │ - User CRUD         ││   │
@@ -649,7 +794,7 @@ The handler will:
 │  │                    │ Storage │                      │   │
 │  │                    └─────────┘                      │   │
 │  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -710,26 +855,28 @@ console.log('Users:', users)
 ### Exports
 
 ```typescript
-// Decorator
-export { Authenticatable }
-
-// Base class
-export { AuthenticatableDurableObject }
-
-// Adapter & config
-export { durableObjectSQLiteAdapter, initBetterAuthTables, createAuth }
+// Core adapter & config
+export { durableObjectSQLiteAdapter, initBetterAuthTables, createAuth, type Auth }
 
 // Middleware
-export { requireAuth, optionalAuth, getBearerToken, getAuthDO }
+export { requireAuth, authMiddleware, getBearerToken, getDO }
+
+// Routers
+export { betterAuthRouter, sqlServerRouter }
 
 // libSQL Server
-export { LibSQLHttpServer }
+export {
+  LibSQLHttpServer,
+  type PipelineRequest,
+  type PipelineResponse,
+  type SqlValue,
+  // ... and more libSQL types
+}
 
 // Types
 export type {
-  Auth,
-  AuthHandler,
-  DurableObjectSQLiteAdapterOptions,
+  DurableObjectSQLiteAdapterConfig,
+  User,
   // ... and many more
 }
 ```
@@ -738,7 +885,6 @@ export type {
 
 ## Additional Resources
 
-- 📖 **[Decorator Usage Examples](./docs/DECORATOR-EXAMPLE.md)**
 - 📋 **[Implementation Details](./docs/IMPLEMENTATION.md)**
 - 🔧 **[libSQL HTTP Server Guide](./docs/LIBSQL-HTTP-SERVER.md)**
 - 📚 **[libSQL Quick Reference](./docs/LIBSQL-QUICK-REFERENCE.md)**
