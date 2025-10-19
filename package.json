@@ -1,7 +1,7 @@
 {
   "name": "@mertdogar/better-auth-do-sqlite",
   "libName": "better-auth-do-sqlite",
-  "version": "0.0.2",
+  "version": "0.0.6",
   "description": "Complete authentication and database solution for Cloudflare Durable Objects with Better Auth and libSQL HTTP protocol support",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
