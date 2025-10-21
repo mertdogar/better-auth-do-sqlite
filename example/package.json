@@ -16,6 +16,6 @@
     "better-auth": "1.3.26",
     "hono": "4.9.10",
     "kysely": "0.28.8",
-    "@mertdogar/better-auth-do-sqlite": "0.0.11"
+    "@mertdogar/better-auth-do-sqlite": "0.0.12"
   }
 }

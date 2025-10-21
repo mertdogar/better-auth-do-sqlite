@@ -3,6 +3,8 @@ import { getDO } from './auth-middleware'
 import { cors } from 'hono/cors'
 import type { PublicAuthVariables } from './types'
 
+
+
 export function sqlServerRouter(doName: string = 'app', prefixRegex: RegExp = /^\/api\/sqld/) {
   const router = new Hono<{ Variables: PublicAuthVariables }>()
 

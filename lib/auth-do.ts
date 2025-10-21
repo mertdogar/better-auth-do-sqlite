@@ -285,24 +285,24 @@ export class AuthDO<DB = BetterAuthDatabase> extends DurableObject<any> {
   }
 
   async getSandboxApiKey(userId: string) {
-    const apiKey = await this.db
-      .selectFrom('apiKey')
+    const sandboxApiKey = await this.db
+      .selectFrom('sandboxApiKey')
       .selectAll()
       .where('userId', '=', userId)
       .executeTakeFirst()
-    if (!apiKey) {
+    if (!sandboxApiKey) {
       return null
     }
-    return apiKey
+    return sandboxApiKey
   }
 
   async getActiveSession(request: Request) {
     const session = await this.auth.api.getSession({ headers: request.headers })
 
     if (session) {
-      const apiKey = await this.getSandboxApiKey(session.user.id)
+      const sandboxApiKey = await this.getSandboxApiKey(session.user.id)
 
-      return { session, sandboxApiKey: apiKey }
+      return { session, sandboxApiKey }
     }
     return null
   }

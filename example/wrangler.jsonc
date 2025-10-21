@@ -11,11 +11,19 @@
         "class_name": "APPDO",
         "name": "APP_DO",
       },
+      {
+        "class_name": "PUBSUBDO",
+        "name": "PUBSUB_DO",
+      },
     ],
   },
   "migrations": [
     {
       "new_sqlite_classes": ["APPDO"],
+      "tag": "v1",
+    },
+    {
+      "new_sqlite_classes": ["PUBSUBDO"],
       "tag": "v1",
     },
   ],

@@ -5,7 +5,7 @@
       "name": "kysely-do-example",
       "dependencies": {
         "@cloudflare/workers-types": "4.20251004.0",
-        "@mertdogar/better-auth-do-sqlite": "0.0.11",
+        "@mertdogar/better-auth-do-sqlite": "0.0.12",
         "better-auth": "1.3.26",
         "hono": "4.9.10",
         "kysely": "0.28.8",
@@ -143,7 +143,7 @@
 
     "@levischuck/tiny-cbor": ["@levischuck/tiny-cbor@0.2.11", "", {}, "sha512-llBRm4dT4Z89aRsm6u2oEZ8tfwL/2l6BwpZ7JcyieouniDECM5AqNgr/y08zalEIvW3RSK4upYyybDcmjXqAow=="],
 
-    "@mertdogar/better-auth-do-sqlite": ["@mertdogar/better-auth-do-sqlite@0.0.11", "", { "dependencies": { "@cloudflare/workers-types": "4.20251004.0", "better-auth": "1.3.26", "hono": "4.9.10", "kysely": "0.28.8" } }, "sha512-9Ll8xMAaoP1J3dYMtlfZ5j2x5Z1ZIFBeG9LUtIlW1iV4O3Tj5X47FtYpSmPeIHttBeepPUyitiwDp8KtT8pctg=="],
+    "@mertdogar/better-auth-do-sqlite": ["@mertdogar/better-auth-do-sqlite@0.0.12", "", { "dependencies": { "@cloudflare/workers-types": "4.20251004.0", "better-auth": "1.3.26", "hono": "4.9.10", "kysely": "0.28.8" } }, "sha512-PJgBlU9keM9Fs6mBdBplwkONCi5eIci05jcFMBORZ959jthhT1YE7oLLJ9oj341FI+n+CEQl1k7g1q4/qu0Zdg=="],
 
     "@noble/ciphers": ["@noble/ciphers@2.0.1", "", {}, "sha512-xHK3XHPUW8DTAobU+G0XT+/w+JLM7/8k1UFdB5xg/zTFPnFCobhftzw8wl4Lw2aq/Rvir5pxfZV5fEazmeCJ2g=="],
 
