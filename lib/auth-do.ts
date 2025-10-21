@@ -1,98 +1,327 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { DurableObject } from 'cloudflare:workers'
-import { createAuth, initBetterAuthTables, type Auth } from './better-auth-config'
-import { User } from 'better-auth'
 import { LibSQLHttpServer } from './libsql-http-server'
-
-export class AuthDO extends DurableObject<any> {
-  protected sql = this.ctx.storage.sql
-  protected auth: Auth | null = null
+import { Kysely } from 'kysely'
+import { DODialect } from './kysely-do'
+import { BetterAuthDatabase } from './types'
+import { betterAuth } from 'better-auth'
+import { admin, apiKey, createAuthMiddleware, openAPI } from 'better-auth/plugins'
+export class AuthDO<DB = BetterAuthDatabase> extends DurableObject<any> {
+  protected db: Kysely<BetterAuthDatabase>
+  protected auth
   protected libsqlServer: LibSQLHttpServer
 
   constructor(ctx: DurableObjectState, env: any) {
     super(ctx, env)
-    initBetterAuthTables(this.sql)
-    this.libsqlServer = new LibSQLHttpServer(this.sql)
+    this.db = new Kysely<BetterAuthDatabase>({
+      dialect: new DODialect({ ctx }),
+    })
+    this.ctx.blockConcurrencyWhile(async () => {
+      await this.initBetterAuthTables()
+    })
+
+    this.auth = betterAuth({
+      database: {
+        db: this.db,
+        type: 'sqlite',
+      },
+      basePath: '/api/auth',
+      emailAndPassword: {
+        enabled: true,
+        requireEmailVerification: false,
+      },
+      advanced: {
+        database: {
+          generateId: () => crypto.randomUUID(),
+        },
+      },
+      plugins: [
+        admin(),
+        apiKey({
+          enableSessionForAPIKeys: true,
+        }),
+        openAPI(),
+      ],
+      hooks: {
+        after: createAuthMiddleware(async (ctx) => {
+          if (ctx.path.includes('/sign-up')) {
+            const newSession = ctx.context.newSession
+            if (newSession) {
+              const apiKeyResponse = await this.auth.api.createApiKey({
+                body: {
+                  name: 'default',
+                  userId: newSession.user.id, // server-only
+                  rateLimitEnabled: false,
+                  rateLimitTimeWindow: 1000000000,
+                },
+              })
+
+              if (!apiKeyResponse) {
+                console.error('Failed to create API key:', apiKeyResponse)
+                return
+              }
+
+              await this.db
+                .insertInto('sandboxApiKey')
+                .values({
+                  id: crypto.randomUUID(),
+                  userId: newSession.user.id,
+                  apiKeyId: apiKeyResponse.id!,
+                  apiKey: apiKeyResponse.key!,
+                })
+                .execute()
+            }
+          }
+        }),
+      },
+    })
+
+    this.libsqlServer = new LibSQLHttpServer(this.ctx.storage.sql)
   }
 
-  getSandboxApiKey(userId: string) {
-    const apiKey = this.sql
-      .exec(`SELECT id, api_key_id, api_key FROM sandboxApiKey WHERE user_id = ?`, userId)
-      .toArray()[0] as {
-      id: string
-      api_key_id: string
-      api_key: string
-    }
+  getDB(): Kysely<BetterAuthDatabase & DB> {
+    return this.db as unknown as Kysely<BetterAuthDatabase & DB>
+  }
+
+  private async initBetterAuthTables() {
+    // Enable foreign keys
+    this.ctx.storage.sql.exec('PRAGMA foreign_keys = ON')
+    // Users table
+    await this.db.schema
+      .createTable('user')
+      .ifNotExists()
+      .addColumn('id', 'text', (col) => col.primaryKey())
+      .addColumn('email', 'text', (col) => col.unique().notNull())
+      .addColumn('emailVerified', 'integer', (col) => col.defaultTo(0))
+      .addColumn('name', 'text', (col) => col.notNull())
+      .addColumn('image', 'text')
+      .addColumn('createdAt', 'integer', (col) => col.notNull())
+      .addColumn('updatedAt', 'integer', (col) => col.notNull())
+      .addColumn('role', 'text', (col) => col.defaultTo('user'))
+      .addColumn('banned', 'integer', (col) => col.defaultTo(0))
+      .addColumn('banReason', 'text')
+      .addColumn('banExpires', 'integer')
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxUserEmail')
+      .ifNotExists()
+      .on('user')
+      .column('email')
+      .execute()
+
+    // Accounts table (for OAuth and credentials)
+    await this.db.schema
+      .createTable('account')
+      .ifNotExists()
+      .addColumn('id', 'text', (col) => col.primaryKey())
+      .addColumn('userId', 'text', (col) => col.notNull())
+      .addColumn('accountId', 'text', (col) => col.notNull())
+      .addColumn('providerId', 'text', (col) => col.notNull())
+      .addColumn('accessToken', 'text')
+      .addColumn('refreshToken', 'text')
+      .addColumn('idToken', 'text')
+      .addColumn('expiresAt', 'integer')
+      .addColumn('password', 'text')
+      .addColumn('createdAt', 'integer', (col) => col.notNull())
+      .addColumn('updatedAt', 'integer', (col) => col.notNull())
+      .addForeignKeyConstraint('fkAccountUser', ['userId'], 'user', ['id'], (cb) =>
+        cb.onDelete('cascade')
+      )
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxAccountUser')
+      .ifNotExists()
+      .on('account')
+      .column('userId')
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxAccountProvider')
+      .ifNotExists()
+      .on('account')
+      .columns(['providerId', 'accountId'])
+      .execute()
+
+    // Sessions table
+    await this.db.schema
+      .createTable('session')
+      .ifNotExists()
+      .addColumn('id', 'text', (col) => col.primaryKey())
+      .addColumn('userId', 'text', (col) => col.notNull())
+      .addColumn('expiresAt', 'integer', (col) => col.notNull())
+      .addColumn('token', 'text', (col) => col.unique().notNull())
+      .addColumn('ipAddress', 'text')
+      .addColumn('userAgent', 'text')
+      .addColumn('createdAt', 'integer', (col) => col.notNull())
+      .addColumn('updatedAt', 'integer', (col) => col.notNull())
+      .addColumn('impersonatedBy', 'text')
+      .addForeignKeyConstraint('fkSessionUser', ['userId'], 'user', ['id'], (cb) =>
+        cb.onDelete('cascade')
+      )
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxSessionUser')
+      .ifNotExists()
+      .on('session')
+      .column('userId')
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxSessionToken')
+      .ifNotExists()
+      .on('session')
+      .column('token')
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxSessionExpires')
+      .ifNotExists()
+      .on('session')
+      .column('expiresAt')
+      .execute()
+
+    // Verification tokens table (for email verification, password reset)
+    await this.db.schema
+      .createTable('verification')
+      .ifNotExists()
+      .addColumn('id', 'text', (col) => col.primaryKey())
+      .addColumn('identifier', 'text', (col) => col.notNull())
+      .addColumn('value', 'text', (col) => col.notNull())
+      .addColumn('expiresAt', 'integer', (col) => col.notNull())
+      .addColumn('createdAt', 'integer', (col) => col.notNull())
+      .addColumn('updatedAt', 'integer', (col) => col.notNull())
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxVerificationIdentifier')
+      .ifNotExists()
+      .on('verification')
+      .column('identifier')
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxVerificationValue')
+      .ifNotExists()
+      .on('verification')
+      .column('value')
+      .execute()
+
+    // API Keys table
+    await this.db.schema
+      .createTable('apiKey')
+      .ifNotExists()
+      .addColumn('id', 'text', (col) => col.primaryKey())
+      .addColumn('name', 'text')
+      .addColumn('start', 'text')
+      .addColumn('prefix', 'text')
+      .addColumn('key', 'text', (col) => col.notNull())
+      .addColumn('userId', 'text', (col) => col.notNull())
+      .addColumn('refillInterval', 'integer')
+      .addColumn('refillAmount', 'integer')
+      .addColumn('lastRefillAt', 'integer')
+      .addColumn('enabled', 'integer', (col) => col.notNull().defaultTo(1))
+      .addColumn('rateLimitEnabled', 'integer', (col) => col.notNull().defaultTo(0))
+      .addColumn('rateLimitTimeWindow', 'integer')
+      .addColumn('rateLimitMax', 'integer')
+      .addColumn('requestCount', 'integer', (col) => col.notNull().defaultTo(0))
+      .addColumn('remaining', 'integer')
+      .addColumn('lastRequest', 'integer')
+      .addColumn('expiresAt', 'integer')
+      .addColumn('createdAt', 'integer', (col) => col.notNull())
+      .addColumn('updatedAt', 'integer', (col) => col.notNull())
+      .addColumn('permissions', 'text')
+      .addColumn('metadata', 'text')
+      .addForeignKeyConstraint('fkApikeyUser', ['userId'], 'user', ['id'], (cb) =>
+        cb.onDelete('cascade')
+      )
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxApikeyUser')
+      .ifNotExists()
+      .on('apiKey')
+      .column('userId')
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxApikeyKey')
+      .ifNotExists()
+      .on('apiKey')
+      .column('key')
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxApikeyExpires')
+      .ifNotExists()
+      .on('apiKey')
+      .column('expiresAt')
+      .execute()
+
+    await this.db.schema
+      .createIndex('idxApikeyEnabled')
+      .ifNotExists()
+      .on('apiKey')
+      .column('enabled')
+      .execute()
+
+    // API Keys for sandboxes table
+    await this.db.schema
+      .createTable('sandboxApiKey')
+      .ifNotExists()
+      .addColumn('id', 'text', (col) => col.primaryKey())
+      .addColumn('userId', 'text', (col) => col.notNull())
+      .addColumn('apiKeyId', 'text', (col) => col.notNull())
+      .addColumn('apiKey', 'text', (col) => col.notNull())
+      .addForeignKeyConstraint('fkSandboxApikeyUser', ['userId'], 'user', ['id'], (cb) =>
+        cb.onDelete('cascade')
+      )
+      .addForeignKeyConstraint('fkSandboxApikeyApikey', ['apiKeyId'], 'apiKey', ['id'], (cb) =>
+        cb.onDelete('cascade')
+      )
+      .execute()
+  }
+
+  async getSandboxApiKey(userId: string) {
+    const apiKey = await this.db
+      .selectFrom('apiKey')
+      .selectAll()
+      .where('userId', '=', userId)
+      .executeTakeFirst()
     if (!apiKey) {
       return null
     }
-    return { id: apiKey.id, api_key_id: apiKey.api_key_id, api_key: apiKey.api_key }
-  }
-
-  /**
-   * Initialize auth instance with the base URL
-   */
-  getAuth(): Auth {
-    if (!this.auth) {
-      this.auth = createAuth(this.sql)
-    }
-    return this.auth
+    return apiKey
   }
 
   async getActiveSession(request: Request) {
-    const session = await this.getAuth().api.getSession({ headers: request.headers })
+    const session = await this.auth.api.getSession({ headers: request.headers })
 
     if (session) {
-      const apiKey = this.getSandboxApiKey(session.user.id)
+      const apiKey = await this.getSandboxApiKey(session.user.id)
 
       return { session, sandboxApiKey: apiKey }
     }
     return null
   }
 
-  /**
-   * Handle incoming requests
-   * Routes to either BetterAuth or libSQL HTTP server based on path
-   */
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
     const path = url.pathname
     console.log('fetch ==> ', request.url, path)
-    // Route libSQL HTTP protocol requests to libSQL server
     if (this.isLibSQLRequest(path)) {
-      const authHeader = request.headers.get('Authorization')
-      console.log('authHeader', authHeader)
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        console.log('Unauthorized')
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      }
-
-      const token = authHeader.slice(7)
-      const user = await this.getAuthenticatedUser(token)
-      if ('error' in user) {
-        return new Response(JSON.stringify({ error: 'Invalid token' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      }
-
-      // Remove the /sql prefix and forward to libSQL server
       const sqlPath = path.replace(/^\/sql/, '') || '/'
       const sqlUrl = new URL(request.url)
       sqlUrl.pathname = sqlPath
 
-      const sqlRequest = new Request(sqlUrl, request)
-      return await this.libsqlServer.handleRequest(sqlRequest)
+      return await this.libsqlServer.handleRequest(new Request(sqlUrl, request))
     }
 
-    // Otherwise, forward to BetterAuth
-    const auth = this.getAuth()
-
     try {
-      return await auth.handler(request)
+      console.log('auth.handler ==> ', request.url)
+      return await this.auth.handler(request)
     } catch (error) {
       console.error('Auth error:', error)
       return new Response(JSON.stringify({ error: 'Authentication error' }), {
@@ -102,445 +331,7 @@ export class AuthDO extends DurableObject<any> {
     }
   }
 
-  /**
-   * Check if request is for libSQL HTTP protocol
-   */
   protected isLibSQLRequest(path: string): boolean {
     return path.startsWith('/sql/') || path === '/sql'
-  }
-
-  /**
-   * RPC: Sign up a new user
-   */
-  async signUp(
-    email: string,
-    name: string,
-    password: string
-  ): Promise<
-    | {
-        user: User
-        session: { token: string }
-      }
-    | { error: string }
-  > {
-    try {
-      const now = Date.now()
-      const userId = crypto.randomUUID()
-
-      // Hash password using Web Crypto API
-      const passwordHash = await this.hashPassword(password)
-
-      await this.ctx.storage.transaction(async () => {
-        // Create user
-        this.sql.exec(
-          `INSERT INTO user (id, email, email_verified, name, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          userId,
-          email,
-          0,
-          name,
-          now,
-          now
-        )
-
-        // Create account with password
-        const accountId = crypto.randomUUID()
-        this.sql.exec(
-          `INSERT INTO account (id, user_id, account_id, provider_id, password, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          accountId,
-          userId,
-          email,
-          'credential',
-          passwordHash,
-          now,
-          now
-        )
-      })
-
-      // Create session
-      const sessionToken = this.generateToken()
-      const sessionId = crypto.randomUUID()
-      const expiresAt = now + 30 * 24 * 60 * 60 * 1000 // 30 days
-
-      await this.ctx.storage.transaction(async () => {
-        this.sql.exec(
-          `INSERT INTO session (id, user_id, token, expires_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          sessionId,
-          userId,
-          sessionToken,
-          expiresAt,
-          now,
-          now
-        )
-      })
-
-      return {
-        user: {
-          id: userId,
-          email,
-          name,
-          emailVerified: false,
-          createdAt: new Date(now),
-          updatedAt: new Date(now),
-        },
-        session: { token: sessionToken },
-      }
-    } catch (error: any) {
-      if (error.message?.includes('UNIQUE')) {
-        return { error: 'User with this email already exists' }
-      }
-      return { error: `Failed to sign up: ${error.message}` }
-    }
-  }
-
-  /**
-   * RPC: Sign in
-   */
-  async signIn(
-    email: string,
-    password: string
-  ): Promise<
-    | {
-        user: User
-        session: { token: string }
-      }
-    | { error: string }
-  > {
-    try {
-      // Get user and account
-      const userRow = this.sql
-        .exec(
-          `SELECT u.id, u.email, u.name, u.email_verified as emailVerified,
-                u.image, u.created_at as createdAt, u.updated_at as updatedAt,
-                a.password
-         FROM user u
-         INNER JOIN account a ON a.user_id = u.id AND a.provider_id = 'credential'
-         WHERE u.email = ?`,
-          email
-        )
-        .toArray()[0] as any
-
-      if (!userRow) {
-        return { error: 'Invalid email or password' }
-      }
-
-      // Verify password
-      const isValid = await this.verifyPassword(password, userRow.password)
-      if (!isValid) {
-        return { error: 'Invalid email or password' }
-      }
-
-      // Create session
-      const now = Date.now()
-      const sessionToken = this.generateToken()
-      const sessionId = crypto.randomUUID()
-      const expiresAt = now + 30 * 24 * 60 * 60 * 1000 // 30 days
-
-      await this.ctx.storage.transaction(async () => {
-        this.sql.exec(
-          `INSERT INTO session (id, user_id, token, expires_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          sessionId,
-          userRow.id,
-          sessionToken,
-          expiresAt,
-          now,
-          now
-        )
-      })
-
-      return {
-        user: {
-          id: userRow.id,
-          email: userRow.email,
-          name: userRow.name,
-          emailVerified: Boolean(userRow.emailVerified),
-          image: userRow.image,
-          createdAt: userRow.createdAt,
-          updatedAt: userRow.updatedAt,
-        },
-        session: { token: sessionToken },
-      }
-    } catch (error: any) {
-      return { error: `Failed to sign in: ${error.message}` }
-    }
-  }
-
-  /**
-   * RPC: Get authenticated user by token
-   */
-  async getAuthenticatedUser(token: string): Promise<User | { error: string }> {
-    if (token === 'test-token') {
-      return {
-        id: 'test-user-id',
-        email: 'test@test.com',
-        name: 'Test User',
-        emailVerified: false,
-        createdAt: new Date(Date.now()),
-        updatedAt: new Date(Date.now()),
-        image: undefined,
-      }
-    }
-    try {
-      const now = Date.now()
-
-      // Clean up expired sessions
-      await this.ctx.storage.transaction(async () => {
-        this.sql.exec(`DELETE FROM session WHERE expires_at < ?`, now)
-      })
-
-      const row = this.sql
-        .exec(
-          `SELECT u.id, u.email, u.name, u.email_verified as emailVerified,
-                u.image, u.created_at as createdAt, u.updated_at as updatedAt
-         FROM user u
-         INNER JOIN session s ON s.user_id = u.id
-         WHERE s.token = ? AND s.expires_at > ?`,
-          token,
-          now
-        )
-        .toArray()[0] as any
-
-      if (!row) {
-        return { error: 'Invalid or expired token' }
-      }
-
-      return {
-        id: row.id,
-        email: row.email,
-        name: row.name,
-        emailVerified: Boolean(row.emailVerified),
-        image: row.image,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-      }
-    } catch (error: any) {
-      return { error: `Failed to get authenticated user: ${error.message}` }
-    }
-  }
-
-  /**
-   * RPC: Request password reset
-   */
-  async requestPasswordReset(email: string): Promise<
-    | {
-        resetToken: string
-      }
-    | { error: string }
-  > {
-    try {
-      const row = this.sql.exec(`SELECT id FROM user WHERE email = ?`, email).toArray()[0] as
-        | { id: string }
-        | undefined
-
-      if (!row) {
-        // Don't reveal if user exists - return success anyway for security
-        return { resetToken: 'dummy-token' }
-      }
-
-      const now = Date.now()
-      const resetToken = this.generateToken()
-      const verificationId = crypto.randomUUID()
-      const expiresAt = now + 60 * 60 * 1000 // 1 hour
-
-      await this.ctx.storage.transaction(async () => {
-        this.sql.exec(
-          `INSERT INTO verification (id, identifier, value, expires_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          verificationId,
-          email,
-          resetToken,
-          expiresAt,
-          now,
-          now
-        )
-      })
-
-      return { resetToken }
-    } catch (error: any) {
-      return { error: `Failed to request password reset: ${error.message}` }
-    }
-  }
-
-  /**
-   * RPC: Reset password using token
-   */
-  async resetPassword(
-    resetToken: string,
-    newPassword: string
-  ): Promise<
-    | {
-        success: boolean
-      }
-    | { error: string }
-  > {
-    try {
-      const now = Date.now()
-
-      const row = this.sql
-        .exec(
-          `SELECT id, identifier, expires_at as expiresAt
-         FROM verification
-         WHERE value = ?`,
-          resetToken
-        )
-        .toArray()[0] as any
-
-      if (!row) {
-        return { error: 'Invalid reset token' }
-      }
-
-      if (row.expiresAt < now) {
-        return { error: 'Reset token has expired' }
-      }
-
-      const email = row.identifier
-      const passwordHash = await this.hashPassword(newPassword)
-
-      // Get user
-      const userRow = this.sql.exec(`SELECT id FROM user WHERE email = ?`, email).toArray()[0] as
-        | { id: string }
-        | undefined
-
-      if (!userRow) {
-        return { error: 'User not found' }
-      }
-
-      await this.ctx.storage.transaction(async () => {
-        // Update password
-        this.sql.exec(
-          `UPDATE account SET password = ?, updated_at = ?
-           WHERE user_id = ? AND provider_id = 'credential'`,
-          passwordHash,
-          now,
-          userRow.id
-        )
-
-        // Delete verification token
-        this.sql.exec(`DELETE FROM verification WHERE id = ?`, row.id)
-
-        // Invalidate all existing sessions for this user
-        this.sql.exec(`DELETE FROM session WHERE user_id = ?`, userRow.id)
-      })
-
-      return { success: true }
-    } catch (error: any) {
-      return { error: `Failed to reset password: ${error.message}` }
-    }
-  }
-
-  /**
-   * RPC: Sign out
-   */
-  async signOut(token: string): Promise<{ success: boolean }> {
-    try {
-      await this.ctx.storage.transaction(async () => {
-        this.sql.exec(`DELETE FROM session WHERE token = ?`, token)
-      })
-
-      return { success: true }
-    } catch (error) {
-      console.error('Failed to sign out:', error)
-      return { success: false }
-    }
-  }
-
-  /**
-   * RPC: Get user by ID
-   */
-  async getUserById(userId: string): Promise<User | { error: string }> {
-    try {
-      const row = this.sql
-        .exec(
-          `SELECT id, email, name, email_verified as emailVerified,
-                image, created_at as createdAt, updated_at as updatedAt
-         FROM user WHERE id = ?`,
-          userId
-        )
-        .toArray()[0] as any
-
-      if (!row) {
-        return { error: 'User not found?' }
-      }
-
-      return {
-        id: row.id,
-        email: row.email,
-        name: row.name,
-        emailVerified: Boolean(row.emailVerified),
-        image: row.image,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-      }
-    } catch (error: any) {
-      return { error: `Failed to get user: ${error.message}` }
-    }
-  }
-
-  /**
-   * RPC: List all users
-   */
-  async listUsers(
-    limit = 50,
-    offset = 0
-  ): Promise<{
-    users: User[]
-    total: number
-  }> {
-    const rows = this.sql
-      .exec(
-        `SELECT id, email, name, email_verified as emailVerified,
-              image, created_at as createdAt, updated_at as updatedAt
-       FROM user
-       ORDER BY created_at DESC
-       LIMIT ? OFFSET ?`,
-        limit,
-        offset
-      )
-      .toArray() as any[]
-
-    const totalRow = this.sql.exec(`SELECT COUNT(*) as count FROM user`).toArray()[0] as {
-      count: number
-    }
-
-    return {
-      users: rows.map((row) => ({
-        id: row.id,
-        email: row.email,
-        name: row.name,
-        emailVerified: Boolean(row.emailVerified),
-        image: row.image,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-      })),
-      total: totalRow.count,
-    }
-  }
-
-  /** Hash password using Web Crypto API */
-  protected async hashPassword(password: string): Promise<string> {
-    const encoder = new TextEncoder()
-    const data = encoder.encode(password)
-    const hash = await crypto.subtle.digest('SHA-256', data)
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('')
-  }
-
-  /** Verify password against hash */
-  protected async verifyPassword(password: string, hash: string): Promise<boolean> {
-    const passwordHash = await this.hashPassword(password)
-    return passwordHash === hash
-  }
-
-  /** Generate a secure random token */
-  protected generateToken(): string {
-    const array = new Uint8Array(32)
-    crypto.getRandomValues(array)
-    return Array.from(array)
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('')
   }
 }

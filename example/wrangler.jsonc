@@ -1,0 +1,22 @@
+{
+  "name": "kysely-do",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-04",
+  "vars": {
+    "JWT_SECRET": "",
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "APPDO",
+        "name": "APP_DO",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["APPDO"],
+      "tag": "v1",
+    },
+  ],
+}
